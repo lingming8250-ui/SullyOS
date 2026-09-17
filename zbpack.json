@@ -1,5 +1,6 @@
 {
   "$schema": "https://schema.zeabur.app/zbpack.json",
-  "build_command": "pnpm run build",
+  "app_dir": "/",
+  "build_command": "pnpm exec vite build",
   "output_dir": "dist"
 }
