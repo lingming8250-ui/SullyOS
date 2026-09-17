@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schema.zeabur.app/zbpack.json",
+  "build_command": "pnpm run build",
+  "output_dir": "dist"
+}
