@@ -1,27 +1,36 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppID } from '../types';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { characterLaunch } from '../utils/characterLaunch';
 import { groupLaunch } from '../utils/groupLaunch';
+import { wechatNav } from '../utils/wechatNav';
 import { ChatTeardrop, UsersThree, Compass, UserCircle } from '@phosphor-icons/react';
 
 /**
  * 微信壳。
  *
  * 把原本散在桌面上的四个入口收进一条底部 Tab：
- *   消息   —— 单聊 + 群聊混排的会话列表（就是这里新写的）
+ *   消息   —— 单聊 + 群聊混排的会话列表
  *   通讯录 —— 原来的「神经链接」
  *   朋友圈 —— 原来的 Spark
  *   我     —— 原来的「档案」
  *
- * 设计基准是微信本身的排版，不是任何旧版小手机。
+ * 返回行为：糯米机没有导航栈（openApp 是整体替换），所以从微信点进聊天再按返回
+ * 会直接回桌面。这里用 OSContext 的 registerBackHandler 把「从微信出去」这件事
+ * 接住：出去之前留个记号（utils/wechatNav），按返回时看到记号就回微信。
+ *
+ * 注意：本组件目前挂在 AppID.Browser 那个隐藏槽位上（BrowserApp 转发到这里），
+ * 所以「回微信」要 openApp(AppID.Browser)。等微信拿到自己的 AppID，这行跟着换。
  *
  * 安全区：底部 Tab 栏自己用 --safe-bottom 让位，所以本 App 必须出现在
- * utils/safeAreaApps.ts 的 SELF_SAFE_AREA_APPS 名单里，否则会被外壳再加上一层 padding。
+ * utils/safeAreaApps.ts 的 SELF_SAFE_AREA_APPS 名单里。
  */
 
 const GREEN = '#07c160';
+
+/** 微信壳在 OS 里借用的槽位。以后有真 AppID 了改这里。 */
+const WECHAT_SLOT = AppID.Browser;
 
 type TabKey = 'chats' | 'contacts' | 'moments' | 'me';
 
@@ -83,10 +92,25 @@ const Avatar: React.FC<{ src?: string; name: string; badge?: number }> = ({ src,
 );
 
 const WeChat: React.FC = () => {
-    const { characters, groups, unreadMessages, clearUnread, openApp, setActiveCharacterId, activeCharacterId, userProfile, lastMsgTimestamp } = useOS();
-    const [tab, setTab] = useState<TabKey>('chats');
+    const { characters, groups, unreadMessages, clearUnread, openApp, setActiveCharacterId, activeCharacterId, userProfile, lastMsgTimestamp, registerBackHandler } = useOS();
+
+    // 重新挂载时把上次的 Tab 取回来（从子页面返回的那一次）。
+    const [tab, setTab] = useState<TabKey>(() => (wechatNav.consumeTab() as TabKey) || 'chats');
     const [lastByKey, setLastByKey] = useState<Record<string, any>>({});
     const [loading, setLoading] = useState(true);
+
+    // 注册返回处理器：看到「从微信出去」的记号就回微信，并告诉系统「我接住了」。
+    // 故意不注销——本组件被换掉之后，它还得活着，否则聊天里的返回又掉回桌面。
+    const registered = useRef(false);
+    useEffect(() => {
+        if (registered.current || typeof registerBackHandler !== 'function') return;
+        registered.current = true;
+        registerBackHandler(() => {
+            if (!wechatNav.isArmed()) return false;
+            openApp(WECHAT_SLOT);
+            return true;
+        });
+    }, [registerBackHandler, openApp]);
 
     // 每个会话的最后一条消息。全局 lastMsgTimestamp 一变就重算（它就是干这个的信号）。
     const reload = useCallback(async () => {
@@ -102,7 +126,6 @@ const WeChat: React.FC = () => {
             }
             setLastByKey(map);
         } catch {
-            // 读不到就算了：列表照样要能开，只是没有最后一句预览。
             setLastByKey({});
         } finally {
             setLoading(false);
@@ -139,24 +162,29 @@ const WeChat: React.FC = () => {
                 unread: unreadMessages?.[g.id] || 0,
             });
         }
-        // 有消息的按时间倒序排前面；从没聊过的沉到底，按名字排。
         return list.sort((a, b) => {
             if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
             return a.name.localeCompare(b.name, 'zh');
         });
     }, [characters, groups, lastByKey, unreadMessages]);
 
+    /** 离开微信去子页面之前统一走这里：留记号 + 换 App。 */
+    const leaveTo = (app: AppID) => {
+        wechatNav.leave(tab);
+        openApp(app);
+    };
+
     const openChar = (id: string) => {
         clearUnread?.(id);
         characterLaunch.request({ charId: id });
         setActiveCharacterId?.(id);
-        openApp(AppID.Chat);
+        leaveTo(AppID.Chat);
     };
 
     const openGroup = (id: string) => {
         clearUnread?.(id);
         groupLaunch.request(id);
-        openApp(AppID.GroupChat);
+        leaveTo(AppID.GroupChat);
     };
 
     const TabButton: React.FC<{ k: TabKey; label: string; node: React.ReactNode }> = ({ k, label, node }) => (
@@ -178,7 +206,7 @@ const WeChat: React.FC = () => {
                     {tab === 'chats' ? '微信' : tab === 'contacts' ? '通讯录' : tab === 'moments' ? '朋友圈' : '我'}
                 </span>
                 <button
-                    onClick={() => openApp(AppID.Settings)}
+                    onClick={() => leaveTo(AppID.Settings)}
                     className="absolute right-3 bottom-2 w-8 h-8 flex items-center justify-center text-slate-700 text-xl leading-none"
                     aria-label="更多"
                 >＋</button>
@@ -214,7 +242,7 @@ const WeChat: React.FC = () => {
 
                 {tab === 'contacts' && (
                     <div className="p-3 space-y-2">
-                        <button onClick={() => openApp(AppID.Character)} className="w-full bg-white rounded-xl px-4 py-3 flex items-center justify-between text-left active:bg-slate-100">
+                        <button onClick={() => leaveTo(AppID.Character)} className="w-full bg-white rounded-xl px-4 py-3 flex items-center justify-between text-left active:bg-slate-100">
                             <span className="text-[15px] text-slate-900">角色列表</span>
                             <span className="text-xs text-slate-400">进去管理 →</span>
                         </button>
@@ -232,7 +260,7 @@ const WeChat: React.FC = () => {
 
                 {tab === 'moments' && (
                     <div className="p-3">
-                        <button onClick={() => openApp(AppID.Social)} className="w-full bg-white rounded-xl px-4 py-3 flex items-center justify-between text-left active:bg-slate-100">
+                        <button onClick={() => leaveTo(AppID.Social)} className="w-full bg-white rounded-xl px-4 py-3 flex items-center justify-between text-left active:bg-slate-100">
                             <span className="text-[15px] text-slate-900">朋友圈动态</span>
                             <span className="text-xs text-slate-400">进去看看 →</span>
                         </button>
@@ -249,8 +277,8 @@ const WeChat: React.FC = () => {
                             </div>
                         </div>
                         <div className="bg-white rounded-xl overflow-hidden">
-                            <button onClick={() => openApp(AppID.User)} className="w-full px-4 py-3 text-left text-[15px] text-slate-900 active:bg-slate-100 border-b border-slate-100">档案</button>
-                            <button onClick={() => openApp(AppID.Settings)} className="w-full px-4 py-3 text-left text-[15px] text-slate-900 active:bg-slate-100">设置</button>
+                            <button onClick={() => leaveTo(AppID.User)} className="w-full px-4 py-3 text-left text-[15px] text-slate-900 active:bg-slate-100 border-b border-slate-100">档案</button>
+                            <button onClick={() => leaveTo(AppID.Settings)} className="w-full px-4 py-3 text-left text-[15px] text-slate-900 active:bg-slate-100">设置</button>
                         </div>
                     </div>
                 )}
